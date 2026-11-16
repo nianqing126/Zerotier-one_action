@@ -57,7 +57,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            python3-setuptools rsync unzip zlib1g-dev file wget
+            python3-setuptools rsync unzip zstd zlib1g-dev file wget
 
       - name: 编译 ZeroTier (ipk)
         run: bash scripts/build-zerotier.sh "$TARGET" "$SUBTARGET" "${{ inputs.openwrt_version || '23.05.5' }}"
@@ -82,7 +82,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            python3-setuptools rsync unzip zlib1g-dev file wget
+            python3-setuptools rsync unzip zstd zlib1g-dev file wget
 
       - name: 编译 ZeroTier (apk)
         run: bash scripts/build-zerotier.sh "$TARGET" "$SUBTARGET" snapshot

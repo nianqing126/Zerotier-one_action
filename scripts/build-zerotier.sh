@@ -41,11 +41,36 @@ if [ -z "${SDK_FILE}" ]; then
 fi
 echo "SDK 文件: ${SDK_FILE}"
 
-# 2. 下载并解压 SDK
+# 2. 下载并解压 SDK（稳定版为 .tar.xz，snapshot 为 .tar.zst）
 echo ">>> [2/6] 下载并解压 SDK..."
-wget -q "${BASE}/${SDK_FILE}" -O sdk.tar.xz
-tar -xf sdk.tar.xz
-SDK_DIR="${SDK_FILE%.tar.xz}"
+wget -q "${BASE}/${SDK_FILE}" -O sdk_archive
+case "${SDK_FILE}" in
+  *.tar.zst)
+    echo "检测到 zstd 压缩包，使用 zstd 解压..."
+    command -v unzstd >/dev/null 2>&1 || { echo "ERROR: 缺少 zstd，请在依赖安装步骤中安装 zstd" >&2; exit 1; }
+    tar --use-compress-program=unzstd -xf sdk_archive
+    SDK_DIR="${SDK_FILE%.tar.zst}"
+    ;;
+  *.tar.xz)
+    tar -xf sdk_archive
+    SDK_DIR="${SDK_FILE%.tar.xz}"
+    ;;
+  *)
+    tar -xf sdk_archive
+    SDK_DIR="${SDK_FILE%.tar.*}"
+    ;;
+esac
+
+# 兜底：若按文件名推断的目录不存在，则自动查找真正的 SDK 目录
+if [ ! -d "${SDK_DIR}" ]; then
+  SDK_DIR="$(find . -maxdepth 2 -type f -name 'rules.mk' 2>/dev/null | head -n1 | xargs -r dirname)"
+fi
+if [ ! -d "${SDK_DIR}" ] || [ ! -x "${SDK_DIR}/scripts/feeds" ]; then
+  echo "ERROR: 解压后未找到 SDK 目录，当前目录内容:" >&2
+  ls -la >&2
+  exit 1
+fi
+echo "SDK 目录: ${SDK_DIR}"
 cd "${SDK_DIR}"
 
 # 3. 更新 feeds 并安装 zerotier

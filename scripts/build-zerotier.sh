@@ -3,12 +3,17 @@
 # ZeroTier OpenWrt 云编译脚本（供 GitHub Actions 调用）
 #
 # 用法:
-#   build-zerotier.sh <target> <subtarget> <openwrt版本|snapshot>
+#   build-zerotier.sh <target> <subtarget> <openwrt版本|snapshot> [zerotier源码分支]
 #
 # 示例:
-#   build-zerotier.sh ramips mt7621 23.05.5      # 编译稳定版 -> 产出 .ipk
+#   build-zerotier.sh ramips mt7621 23.05.5      # 编译稳定版 -> 产出 .ipk（feed 版本，1.14.x）
+#   build-zerotier.sh ramips mt7621 23.05.5 master  # 用 master 分支源码编译 1.16.x 的 .ipk
 #   build-zerotier.sh ramips mt7621 snapshot     # 编译快照版 -> 产出 .apk
 #   build-zerotier.sh mediatek filogic 23.05.5
+#
+# 环境变量:
+#   ZT_WITH_LUCI=0   只编主程序，不编 LuCI 界面与语言包（用于同架构的第二套版本，省时）
+#   ZT_WITH_LUCI=1   默认，主程序 + LuCI 界面 + 中文语言包
 #
 # 产物统一输出到当前目录下的 out/ 文件夹
 # =============================================================================
@@ -74,6 +79,12 @@ TARGET="${1:?缺少 target，例如 ramips}"
 SUBTARGET="${2:?缺少 subtarget，例如 mt7621}"
 BRANCH="${3:?缺少 OpenWrt 版本号或 snapshot}"
 PKG="zerotier"
+# 可选：指定 zerotier 包源码所在分支/标签（openwrt/packages），
+# 留空则使用 SDK feed 自带版本（23.05 为 1.14.1）。
+# 例：master -> 1.16.2，可在 23.05 SDK 上编出可在 23.05 系统运行的 1.16 包。
+ZT_REF="${4:-}"
+# 是否编译 LuCI 界面与语言包（它们与 zerotier 版本无关，同一架构编一次即可）
+WITH_LUCI="${ZT_WITH_LUCI:-1}"
 
 if [ "${BRANCH}" = "snapshot" ]; then
   BASE="https://downloads.openwrt.org/snapshots/targets/${TARGET}/${SUBTARGET}"
@@ -85,6 +96,8 @@ echo "=========================================================="
 echo " Target      : ${TARGET}/${SUBTARGET}"
 echo " OpenWrt     : ${BRANCH}"
 echo " SDK Base URL: ${BASE}"
+echo " ZeroTier 源 : ${ZT_REF:-SDK feed 自带版本}"
+echo " 编译 LuCI   : $([ "${WITH_LUCI}" = "1" ] && echo 是 || echo 否)"
 echo "=========================================================="
 
 # 1. 从 sha256sums 解析 SDK 文件名（兼容不同 gcc 版本命名）
@@ -130,18 +143,143 @@ echo "SDK 目录: ${SDK_DIR}"
 cd "${SDK_DIR}"
 
 # 3. 更新 feeds 并安装软件包
-#    zerotier 主程序来自 packages feed；
+#    zerotier 主程序默认来自 packages feed（可用第 4 个参数改用指定分支源码）；
 #    LuCI 界面与中文语言包使用本仓库内嵌的 packages/luci-app-zerotier
-PACKAGES=(
-  "zerotier"
-  "luci-app-zerotier"
-  "luci-i18n-zerotier-zh-cn"
-)
+if [ "${WITH_LUCI}" = "1" ]; then
+  PACKAGES=(
+    "zerotier"
+    "luci-app-zerotier"
+    "luci-i18n-zerotier-zh-cn"
+  )
+else
+  # 第二套版本（如 1.16）只编主程序，界面包已由第一套产出，避免重复与同名覆盖
+  PACKAGES=("zerotier")
+fi
 
 echo ">>> [3/6] 更新 feeds 并安装依赖 ..."
 ./scripts/feeds update -a
+
+if [ -z "${ZT_REF}" ]; then
+  # SDK 自带的 packages feed 可能停留在发布当时的快照（例如 23.05.5 SDK 里是 zerotier 1.12.2），
+  # 而分支上早已更新。这里检测版本，明显偏旧时从 GitHub 按分支重新浅拉取。
+  FEED_BRANCH="master"
+  if [ "${BRANCH}" != "snapshot" ]; then
+    FEED_BRANCH="openwrt-$(printf '%s' "${BRANCH}" | cut -d. -f1-2)"
+  fi
+  CUR_ZT_VER="$(grep -m1 '^PKG_VERSION:=' feeds/packages/net/zerotier/Makefile 2>/dev/null | cut -d= -f2 | tr -d ' ' || true)"
+  echo ">>> packages feed 中的 zerotier 版本: ${CUR_ZT_VER:-未知}（feeds 分支: ${FEED_BRANCH}）"
+  case "${CUR_ZT_VER}" in
+    1.12.*|1.14.*|"")
+      # 1.12/1.14 都落后于当前分支最新版，统一拉一次
+      echo ">>> 版本偏旧，从 GitHub 重新拉取 packages feed: ${FEED_BRANCH}"
+      TMP_FEED_ROOT="$(mktemp -d)"
+      # 先克隆到临时目录，成功后再替换，避免克隆失败把原 feed 弄没
+      if git clone --depth 1 --branch "${FEED_BRANCH}" \
+            https://github.com/openwrt/packages.git "${TMP_FEED_ROOT}/packages"; then
+        rm -rf feeds/packages
+        mv "${TMP_FEED_ROOT}/packages" feeds/packages
+        NEW_ZT_VER="$(grep -m1 '^PKG_VERSION:=' feeds/packages/net/zerotier/Makefile | cut -d= -f2 | tr -d ' ' || true)"
+        echo ">>> 重新拉取完成，zerotier 版本: ${NEW_ZT_VER}"
+      else
+        echo "WARNING: 重新拉取失败，继续使用 SDK 内置版本 ${CUR_ZT_VER}" >&2
+      fi
+      rm -rf "${TMP_FEED_ROOT}"
+      ;;
+  esac
+fi
+
 # luci-base 用于构建语言包所需的 po2lmo 主机工具
-./scripts/feeds install zerotier luci-base
+if [ "${WITH_LUCI}" = "1" ]; then
+  ./scripts/feeds install luci-base
+fi
+
+# 3b. 指定源码分支：把该分支的 net/zerotier 直接放进 SDK 的 package/ 目录
+#     绕开 feeds 索引，避免索引里记录的版本与实际 Makefile 不一致引发告警
+#
+# 获取方式按可靠性排序，前一级失败自动降级：
+#   1) git sparse-checkout（只取 net/zerotier，CI 上通常 3~5 秒）
+#   2) jsDelivr CDN 按文件清单逐个下载（不依赖 git，约 11 个小文件）
+fetch_zt_pkg() {
+  local ref="$1" dest="$2"
+
+  # --- 级别 1：git sparse checkout ---
+  local tmp
+  tmp="$(mktemp -d)"
+  if git clone --depth 1 --branch "${ref}" --filter=blob:none --no-checkout \
+        https://github.com/openwrt/packages.git "${tmp}/repo" >/dev/null 2>&1; then
+    if ( cd "${tmp}/repo" \
+         && git sparse-checkout init --cone >/dev/null 2>&1 \
+         && git sparse-checkout set net/zerotier >/dev/null 2>&1 \
+         && git checkout >/dev/null 2>&1 ) \
+       && [ -f "${tmp}/repo/net/zerotier/Makefile" ]; then
+      mkdir -p "${dest}"
+      cp -r "${tmp}/repo/net/zerotier/." "${dest}/"
+      rm -rf "${tmp}"
+      echo "     （来源: git sparse-checkout）"
+      return 0
+    fi
+  fi
+  rm -rf "${tmp}"
+
+  # --- 级别 2：jsDelivr CDN 按清单下载 ---
+  echo "     git 获取失败，改用 jsDelivr CDN 下载包文件..."
+  local base="https://cdn.jsdelivr.net/gh/openwrt/packages@${ref}/net/zerotier"
+  local files=(
+    "Makefile"
+    "Config.in"
+    "files/etc/config/zerotier"
+    "files/etc/init.d/zerotier"
+    "files/etc/uci-defaults/80-zt-migration"
+    "patches/0001-fix-miniupnpc-natpmp-include-path.patch"
+    "patches/0002-remove-PIE-options.patch"
+    "patches/0003-fix-compilation-for-arm_cortex-a7-neon.patch"
+    "patches/0004-add-missing-libatomic.patch"
+    "patches/0005-remove-noexecstack.patch"
+    "patches/0006-add-support-for-miniupnpc-2.2.8.patch"
+  )
+  mkdir -p "${dest}"
+  local f failed=0
+  for f in "${files[@]}"; do
+    mkdir -p "${dest}/$(dirname "${f}")"
+    curl -fsSL --retry 3 --max-time 60 "${base}/${f}" -o "${dest}/${f}" 2>/dev/null || {
+      rm -f "${dest}/${f}"
+      failed=$((failed + 1))
+      echo "     [warn] 下载失败: ${f}" >&2
+    }
+  done
+  chmod +x "${dest}/files/etc/init.d/zerotier" \
+           "${dest}/files/etc/uci-defaults/80-zt-migration" 2>/dev/null || true
+
+  # 只要 Makefile 拿到、且失败项不涉及 Makefile，就认为可用
+  if [ -f "${dest}/Makefile" ] && grep -q '^PKG_VERSION:=' "${dest}/Makefile"; then
+    [ "${failed}" -gt 0 ] && echo "     [warn] 有 ${failed} 个文件未下载到（不影响主程序编译）" >&2
+    echo "     （来源: jsDelivr CDN）"
+    return 0
+  fi
+  return 1
+}
+
+if [ -n "${ZT_REF}" ]; then
+  echo ">>> 从 openwrt/packages@${ZT_REF} 获取 zerotier 包源码 ..."
+  ZT_SRC="$(mktemp -d)/zerotier"
+  if fetch_zt_pkg "${ZT_REF}" "${ZT_SRC}"; then
+    rm -rf package/zerotier package/feeds/packages/zerotier
+    cp -r "${ZT_SRC}" package/zerotier
+    ZT_VER="$(grep -m1 '^PKG_VERSION:=' package/zerotier/Makefile | cut -d= -f2 | tr -d ' ' || true)"
+    echo ">>> 已切换 zerotier 源码版本: ${ZT_VER:-未知}"
+  else
+    echo "ERROR: 无法从 openwrt/packages@${ZT_REF} 获取 zerotier 源码" >&2
+    exit 1
+  fi
+  rm -rf "$(dirname "${ZT_SRC}")"
+else
+  ./scripts/feeds install zerotier
+fi
+
+# ===== LuCI 界面与语言包注入（仅在 ZT_WITH_LUCI=1 时执行）=====================
+# 它们是 Architecture: all（noarch），与 zerotier 版本无关，同一架构只编一次即可；
+# 第二套版本（ZT_WITH_LUCI=0）直接复用第一套产出的同名界面包。
+if [ "${WITH_LUCI}" = "1" ]; then
 
 # 内嵌 LuCI 应用到 SDK 的 package 目录
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -237,6 +375,11 @@ if ! grep -q 'feeds/luci/luci.mk' package/luci-app-zerotier/Makefile 2>/dev/null
   write_luci_makefile package/luci-app-zerotier
 fi
 
+else
+  echo ">>> 跳过 LuCI 界面与语言包（ZT_WITH_LUCI=${WITH_LUCI}，复用第一套产物）"
+fi
+# ===== LuCI 注入结束 =========================================================
+
 # 4. 生成配置（显式启用三个包，defconfig 会自动补齐依赖）
 echo ">>> [4/6] 生成配置..."
 for p in "${PACKAGES[@]}"; do
@@ -254,17 +397,25 @@ done
 echo ">>> [5/6] 开始编译: ${PACKAGES[*]} ..."
 
 # 语言包需要 po2lmo 主机工具（由 luci-base 的 host 部分提供，装在 hostpkg 或 host 目录）
-if [ ! -x staging_dir/hostpkg/bin/po2lmo ] && [ ! -x staging_dir/host/bin/po2lmo ]; then
-  LUCI_BASE_DIR="$(find package -maxdepth 3 -type d -name luci-base 2>/dev/null | head -n1)"
-  if [ -n "${LUCI_BASE_DIR}" ]; then
-    echo ">>> 构建 po2lmo 主机工具: ${LUCI_BASE_DIR}/host/compile"
-    make "${LUCI_BASE_DIR}/host/compile" -j"$(nproc)" >/tmp/po2lmo.log 2>&1 || \
-      echo "WARNING: po2lmo 构建失败，语言包可能会缺失（详见 /tmp/po2lmo.log）" >&2
+if [ "${WITH_LUCI}" = "1" ]; then
+  if [ ! -x staging_dir/hostpkg/bin/po2lmo ] && [ ! -x staging_dir/host/bin/po2lmo ]; then
+    LUCI_BASE_DIR="$(find package -maxdepth 3 -type d -name luci-base 2>/dev/null | head -n1)"
+    if [ -n "${LUCI_BASE_DIR}" ]; then
+      echo ">>> 构建 po2lmo 主机工具: ${LUCI_BASE_DIR}/host/compile"
+      make "${LUCI_BASE_DIR}/host/compile" -j"$(nproc)" >/tmp/po2lmo.log 2>&1 || \
+        echo "WARNING: po2lmo 构建失败，语言包可能会缺失（详见 /tmp/po2lmo.log）" >&2
+    fi
   fi
 fi
 
+# 编译目标：主程序必编；LuCI 应用（含语言包，由 luci.mk 一并生成）按开关决定
+BUILD_NAMES=("zerotier")
+if [ "${WITH_LUCI}" = "1" ]; then
+  BUILD_NAMES+=("luci-app-zerotier")
+fi
+
 BUILD_TARGETS=()
-for name in "zerotier" "luci-app-zerotier"; do
+for name in "${BUILD_NAMES[@]}"; do
   dir="$(find package -maxdepth 3 -type d -name "${name}" 2>/dev/null | head -n1)"
   if [ -n "${dir}" ]; then
     BUILD_TARGETS+=("${dir}/compile")

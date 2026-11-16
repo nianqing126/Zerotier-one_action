@@ -258,23 +258,28 @@ install_zt_from_dir() {
   mkdir -p feeds/packages/net
   cp -r "${src}" feeds/packages/net/zerotier
 
-  # 直接实体复制到 feeds 的标准安装位置，不再依赖 `feeds install`：
-  # 它依赖 feeds/*.index 的状态，索引异常时会静默什么也不做（返回 0），
-  # 导致后面找不到 package/feeds/packages/zerotier 而“没有可编译的目标”。
+  # 安装到 package/feeds/<feed>/<pkg>，必须是**符号链接**（这正是 scripts/feeds 的做法：
+  #   ln -sf ../../../feeds/packages/net/zerotier ./package/feeds/packages/
+  # ）。SDK 扫描时靠链接反推出真实路径，进而生成
+  #   source "feeds/packages/net/zerotier/Config.in"
+  # 若改成实体复制，扫描只能从目录名推出 "feeds/packages/zerotier"（丢掉 net/ 这一层），
+  # 再被加上 feeds/base/ 前缀，就变成：
+  #   glob failed: No files found "feeds/base/feeds/packages/zerotier/Config.in"
   mkdir -p package/feeds/packages
-  cp -r "${src}" package/feeds/packages/zerotier
+  ln -sfn ../../../feeds/packages/net/zerotier package/feeds/packages/zerotier
 
   # 尽力重建索引（不联网）；失败不影响编译，编译只扫 package/ 目录
   ./scripts/feeds update -i packages >/dev/null 2>&1 || true
 }
 
-# 兜底：走 feeds install 的分支也确保目录真实存在
+# 兜底：走 feeds install 的分支也确保链接真实存在
 ensure_zt_installed() {
   ./scripts/feeds install zerotier || true
-  if [ ! -d package/feeds/packages/zerotier ]; then
-    echo "     [warn] feeds install 未产出目录，改为直接复制" >&2
+  # 必须用 -L 判断：链接本身存在但目标可能不存在
+  if [ ! -e package/feeds/packages/zerotier ]; then
+    echo "     [warn] feeds install 未产出链接，改为手动创建" >&2
     mkdir -p package/feeds/packages
-    cp -r feeds/packages/net/zerotier package/feeds/packages/zerotier
+    ln -sfn ../../../feeds/packages/net/zerotier package/feeds/packages/zerotier
   fi
 }
 

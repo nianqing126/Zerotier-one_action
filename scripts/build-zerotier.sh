@@ -230,7 +230,7 @@ fetch_zt_pkg() {
 #   make: *** [.../include/toplevel.mk:123: defconfig] Error 1     (exit code 2)
 # 同一份配置里还会连带出现：
 #   tmp/.config-package.in:969:error: recursive dependency detected!
-# 因此 1.14 与 1.16 统一走「覆盖 feed 目录 + feeds install」这一条路径，
+# 因此 1.14 与 1.16 统一走「覆盖 feed 目录 + 实体复制到 package/feeds/packages」，
 # 两者依赖图与安装规则完全一致，只有 PKG_VERSION/PKG_HASH 不同。
 echo ">>> [3/6] 更新 feeds ..."
 ./scripts/feeds update -a
@@ -257,9 +257,25 @@ install_zt_from_dir() {
   rm -rf feeds/packages/net/zerotier
   mkdir -p feeds/packages/net
   cp -r "${src}" feeds/packages/net/zerotier
-  # 只重建本地索引（不联网），保证 install 复制的是刚替换的目录
+
+  # 直接实体复制到 feeds 的标准安装位置，不再依赖 `feeds install`：
+  # 它依赖 feeds/*.index 的状态，索引异常时会静默什么也不做（返回 0），
+  # 导致后面找不到 package/feeds/packages/zerotier 而“没有可编译的目标”。
+  mkdir -p package/feeds/packages
+  cp -r "${src}" package/feeds/packages/zerotier
+
+  # 尽力重建索引（不联网）；失败不影响编译，编译只扫 package/ 目录
   ./scripts/feeds update -i packages >/dev/null 2>&1 || true
-  ./scripts/feeds install zerotier
+}
+
+# 兜底：走 feeds install 的分支也确保目录真实存在
+ensure_zt_installed() {
+  ./scripts/feeds install zerotier || true
+  if [ ! -d package/feeds/packages/zerotier ]; then
+    echo "     [warn] feeds install 未产出目录，改为直接复制" >&2
+    mkdir -p package/feeds/packages
+    cp -r feeds/packages/net/zerotier package/feeds/packages/zerotier
+  fi
 }
 
 if [ -n "${ZT_REF}" ]; then
@@ -293,12 +309,12 @@ else
         install_zt_from_dir "${ZT_TMP}/zerotier"
       else
         echo "WARNING: 拉取失败，继续使用 SDK 自带 ${CUR_ZT_VER}" >&2
-        ./scripts/feeds install zerotier
+        ensure_zt_installed
       fi
       rm -rf "${ZT_TMP}"
       ;;
     *)
-      ./scripts/feeds install zerotier
+      ensure_zt_installed
       ;;
   esac
 fi
@@ -450,7 +466,7 @@ echo ">>> [5/6] 开始编译: ${PACKAGES[*]} ..."
 # 语言包需要 po2lmo 主机工具（由 luci-base 的 host 部分提供，装在 hostpkg 或 host 目录）
 if [ "${WITH_LUCI}" = "1" ]; then
   if [ ! -x staging_dir/hostpkg/bin/po2lmo ] && [ ! -x staging_dir/host/bin/po2lmo ]; then
-    LUCI_BASE_DIR="$(find package -maxdepth 3 -type d -name luci-base 2>/dev/null | head -n1)"
+    LUCI_BASE_DIR="$(find -L package -maxdepth 4 -type d -name luci-base 2>/dev/null | head -n1)"
     if [ -n "${LUCI_BASE_DIR}" ]; then
       echo ">>> 构建 po2lmo 主机工具: ${LUCI_BASE_DIR}/host/compile"
       make "${LUCI_BASE_DIR}/host/compile" -j"$(nproc)" >/tmp/po2lmo.log 2>&1 || \
@@ -467,7 +483,8 @@ fi
 
 BUILD_TARGETS=()
 for name in "${BUILD_NAMES[@]}"; do
-  dir="$(find package -maxdepth 3 -type d -name "${name}" 2>/dev/null | head -n1)"
+  # -L 跟随符号链接（feeds install 可能建软链），maxdepth 4 覆盖 package/feeds/<feed>/<pkg>
+  dir="$(find -L package -maxdepth 4 -type d -name "${name}" 2>/dev/null | head -n1)"
   if [ -n "${dir}" ]; then
     BUILD_TARGETS+=("${dir}/compile")
   else
@@ -476,6 +493,10 @@ for name in "${BUILD_NAMES[@]}"; do
 done
 if [ ${#BUILD_TARGETS[@]} -eq 0 ]; then
   echo "ERROR: 没有可编译的目标" >&2
+  echo "----- package/ 目录结构（排查用）-----" >&2
+  ls -l package 2>/dev/null >&2 || true
+  ls -l package/feeds 2>/dev/null >&2 || true
+  ls -l package/feeds/packages 2>/dev/null | head -n 20 >&2 || true
   exit 1
 fi
 

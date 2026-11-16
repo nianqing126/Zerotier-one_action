@@ -156,45 +156,7 @@ else
   PACKAGES=("zerotier")
 fi
 
-echo ">>> [3/6] 更新 feeds 并安装依赖 ..."
-./scripts/feeds update -a
-
-if [ -z "${ZT_REF}" ]; then
-  # SDK 自带的 packages feed 可能停留在发布当时的快照（例如 23.05.5 SDK 里是 zerotier 1.12.2），
-  # 而分支上早已更新。这里检测版本，明显偏旧时从 GitHub 按分支重新浅拉取。
-  FEED_BRANCH="master"
-  if [ "${BRANCH}" != "snapshot" ]; then
-    FEED_BRANCH="openwrt-$(printf '%s' "${BRANCH}" | cut -d. -f1-2)"
-  fi
-  CUR_ZT_VER="$(grep -m1 '^PKG_VERSION:=' feeds/packages/net/zerotier/Makefile 2>/dev/null | cut -d= -f2 | tr -d ' ' || true)"
-  echo ">>> packages feed 中的 zerotier 版本: ${CUR_ZT_VER:-未知}（feeds 分支: ${FEED_BRANCH}）"
-  case "${CUR_ZT_VER}" in
-    1.12.*|1.14.*|"")
-      # 1.12/1.14 都落后于当前分支最新版，统一拉一次
-      echo ">>> 版本偏旧，从 GitHub 重新拉取 packages feed: ${FEED_BRANCH}"
-      TMP_FEED_ROOT="$(mktemp -d)"
-      # 先克隆到临时目录，成功后再替换，避免克隆失败把原 feed 弄没
-      if git clone --depth 1 --branch "${FEED_BRANCH}" \
-            https://github.com/openwrt/packages.git "${TMP_FEED_ROOT}/packages"; then
-        rm -rf feeds/packages
-        mv "${TMP_FEED_ROOT}/packages" feeds/packages
-        NEW_ZT_VER="$(grep -m1 '^PKG_VERSION:=' feeds/packages/net/zerotier/Makefile | cut -d= -f2 | tr -d ' ' || true)"
-        echo ">>> 重新拉取完成，zerotier 版本: ${NEW_ZT_VER}"
-      else
-        echo "WARNING: 重新拉取失败，继续使用 SDK 内置版本 ${CUR_ZT_VER}" >&2
-      fi
-      rm -rf "${TMP_FEED_ROOT}"
-      ;;
-  esac
-fi
-
-# luci-base 用于构建语言包所需的 po2lmo 主机工具
-if [ "${WITH_LUCI}" = "1" ]; then
-  ./scripts/feeds install luci-base
-fi
-
-# 3b. 指定源码分支：把该分支的 net/zerotier 直接放进 SDK 的 package/ 目录
-#     绕开 feeds 索引，避免索引里记录的版本与实际 Makefile 不一致引发告警
+# 3b. 获取指定分支/版本的 net/zerotier 目录
 #
 # 获取方式按可靠性排序，前一级失败自动降级：
 #   1) git sparse-checkout（只取 net/zerotier，CI 上通常 3~5 秒）
@@ -259,21 +221,91 @@ fetch_zt_pkg() {
   return 1
 }
 
+# 3c. 更新 feeds，并把目标版本的 zerotier 包放进 feeds/packages/net/zerotier
+#
+# 关键：不要把源码目录直接塞到 package/zerotier。
+# SDK 的包扫描脚本会把这种“裸目录”挂到并不存在的 feeds/base/ 路径下，于是
+# tmp/.config-package.in 里生成 source "feeds/base/zerotier/Config.in"，然后：
+#   tmp/.config-package.in:480: glob failed: No files found: "feeds/base/zerotier/Config.in"
+#   make: *** [.../include/toplevel.mk:123: defconfig] Error 1     (exit code 2)
+# 同一份配置里还会连带出现：
+#   tmp/.config-package.in:969:error: recursive dependency detected!
+# 因此 1.14 与 1.16 统一走「覆盖 feed 目录 + feeds install」这一条路径，
+# 两者依赖图与安装规则完全一致，只有 PKG_VERSION/PKG_HASH 不同。
+echo ">>> [3/6] 更新 feeds ..."
+./scripts/feeds update -a
+
+install_zt_from_dir() {
+  local src="$1"
+
+  # 防御 1：Config.in 缺失时，kconfig 展开 Makefile 里的
+  #   source "$(SOURCE)/Config.in"
+  # 会直接报 `glob failed: No files found: ".../Config.in"`，make defconfig 以退出码 2 失败。
+  # （CDN 兜底下载不全时会缺这个文件）
+  if [ ! -f "${src}/Config.in" ]; then
+    printf 'menu "Configuration"\n\tdepends on PACKAGE_zerotier\nendmenu\n' > "${src}/Config.in"
+    echo "     [warn] 包内缺少 Config.in，已生成占位文件"
+  fi
+
+  # 防御 2：files/ 缺失时 install 段的 `$(CP) ./files/* $(1)/` 会失败，直接删掉该行
+  if [ ! -d "${src}/files" ]; then
+    sed -i '\|\$(CP) \./files/\* \$(1)|d' "${src}/Makefile"
+    echo "     [warn] 包内缺少 files/，已从 Makefile 移除对应的安装行"
+  fi
+
+  rm -rf package/zerotier package/feeds/packages/zerotier
+  rm -rf feeds/packages/net/zerotier
+  mkdir -p feeds/packages/net
+  cp -r "${src}" feeds/packages/net/zerotier
+  # 只重建本地索引（不联网），保证 install 复制的是刚替换的目录
+  ./scripts/feeds update -i packages >/dev/null 2>&1 || true
+  ./scripts/feeds install zerotier
+}
+
 if [ -n "${ZT_REF}" ]; then
   echo ">>> 从 openwrt/packages@${ZT_REF} 获取 zerotier 包源码 ..."
-  ZT_SRC="$(mktemp -d)/zerotier"
-  if fetch_zt_pkg "${ZT_REF}" "${ZT_SRC}"; then
-    rm -rf package/zerotier package/feeds/packages/zerotier
-    cp -r "${ZT_SRC}" package/zerotier
-    ZT_VER="$(grep -m1 '^PKG_VERSION:=' package/zerotier/Makefile | cut -d= -f2 | tr -d ' ' || true)"
+  ZT_TMP="$(mktemp -d)"
+  if fetch_zt_pkg "${ZT_REF}" "${ZT_TMP}/zerotier"; then
+    install_zt_from_dir "${ZT_TMP}/zerotier"
+    ZT_VER="$(grep -m1 '^PKG_VERSION:=' feeds/packages/net/zerotier/Makefile | cut -d= -f2 | tr -d ' ' || true)"
     echo ">>> 已切换 zerotier 源码版本: ${ZT_VER:-未知}"
   else
+    rm -rf "${ZT_TMP}"
     echo "ERROR: 无法从 openwrt/packages@${ZT_REF} 获取 zerotier 源码" >&2
     exit 1
   fi
-  rm -rf "$(dirname "${ZT_SRC}")"
+  rm -rf "${ZT_TMP}"
 else
-  ./scripts/feeds install zerotier
+  # SDK 自带的 packages feed 停留在发布当时的快照（23.05.5 里是 1.12.2）。
+  # 版本偏旧时只替换 net/zerotier 这一个目录，不整包替换 feed —— 整包替换会把
+  # 分支最新的包定义塞进旧 SDK，容易引入新的依赖环与缺失符号。
+  FEED_BRANCH="master"
+  if [ "${BRANCH}" != "snapshot" ]; then
+    FEED_BRANCH="openwrt-$(printf '%s' "${BRANCH}" | cut -d. -f1-2)"
+  fi
+  CUR_ZT_VER="$(grep -m1 '^PKG_VERSION:=' feeds/packages/net/zerotier/Makefile 2>/dev/null | cut -d= -f2 | tr -d ' ' || true)"
+  echo ">>> packages feed 中的 zerotier 版本: ${CUR_ZT_VER:-未知}（源分支: ${FEED_BRANCH}）"
+  case "${CUR_ZT_VER}" in
+    1.10.*|1.12.*|1.13.*|"")
+      echo ">>> 版本低于 1.14，从 GitHub 拉取 ${FEED_BRANCH} 的 net/zerotier ..."
+      ZT_TMP="$(mktemp -d)"
+      if fetch_zt_pkg "${FEED_BRANCH}" "${ZT_TMP}/zerotier"; then
+        install_zt_from_dir "${ZT_TMP}/zerotier"
+      else
+        echo "WARNING: 拉取失败，继续使用 SDK 自带 ${CUR_ZT_VER}" >&2
+        ./scripts/feeds install zerotier
+      fi
+      rm -rf "${ZT_TMP}"
+      ;;
+    *)
+      ./scripts/feeds install zerotier
+      ;;
+  esac
+fi
+
+# luci-base 用于构建语言包所需的 po2lmo 主机工具（必须在 feeds update 之后）
+if [ "${WITH_LUCI}" = "1" ]; then
+  ./scripts/feeds install luci-base
 fi
 
 # ===== LuCI 界面与语言包注入（仅在 ZT_WITH_LUCI=1 时执行）=====================
@@ -385,7 +417,26 @@ echo ">>> [4/6] 生成配置..."
 for p in "${PACKAGES[@]}"; do
   grep -q "^CONFIG_PACKAGE_${p}=" .config 2>/dev/null || echo "CONFIG_PACKAGE_${p}=m" >> .config
 done
-make defconfig
+
+DEFCONFIG_RC=0
+make defconfig > /tmp/defconfig.log 2>&1 || DEFCONFIG_RC=$?
+cat /tmp/defconfig.log
+if [ "${DEFCONFIG_RC}" -ne 0 ]; then
+  echo "WARNING: make defconfig 退出码 ${DEFCONFIG_RC}" >&2
+  # 把递归依赖的完整链路打出来（默认只会看到 "recursive dependency detected!" 一行）
+  if grep -q 'recursive dependency' /tmp/defconfig.log; then
+    echo "----- 递归依赖链路 -----" >&2
+    grep -n -B2 -A25 'recursive dependency detected' /tmp/defconfig.log | head -80 >&2 || true
+    echo "------------------------" >&2
+  fi
+  # conf 报错后通常仍会写出 .config：只要目标包还在，就继续编译
+  if grep -q '^CONFIG_PACKAGE_zerotier=' .config 2>/dev/null; then
+    echo "WARNING: .config 已生成且包含 zerotier，继续编译（该告警多半来自未选中的其他包）" >&2
+  else
+    echo "ERROR: 配置生成失败且未能启用 zerotier，编译中止" >&2
+    exit 1
+  fi
+fi
 
 for p in "${PACKAGES[@]}"; do
   if ! grep -q "^CONFIG_PACKAGE_${p}=" .config; then

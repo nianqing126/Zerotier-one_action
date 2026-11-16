@@ -145,13 +145,91 @@ echo ">>> [3/6] 更新 feeds 并安装依赖 ..."
 
 # 内嵌 LuCI 应用到 SDK 的 package 目录
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [ -d "${REPO_ROOT}/packages/luci-app-zerotier" ]; then
-  echo ">>> 注入内嵌 LuCI 应用: luci-app-zerotier"
-  rm -rf package/luci-app-zerotier
-  cp -r "${REPO_ROOT}/packages/luci-app-zerotier" package/luci-app-zerotier
+
+# 适配版 Makefile：用绝对路径引用 luci.mk，脱离 feeds/luci 目录也能编译
+write_luci_makefile() {
+  cat > "$1/Makefile" <<'MK'
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2022 ImmortalWrt.org
+# 内嵌版：源自 immortalwrt/luci applications/luci-app-zerotier
+include $(TOPDIR)/rules.mk
+
+LUCI_TITLE:=LuCI for Zerotier
+LUCI_DEPENDS:=+zerotier
+
+include $(TOPDIR)/feeds/luci/luci.mk
+
+# call BuildPackage - OpenWrt buildroot signature
+MK
+}
+
+# 兜底 1：从 jsDelivr CDN 直接拉取上游 immortalwrt/luci 中的该应用（无需 git）
+fetch_luci_from_cdn() {
+  local dest="$1"
+  local base="https://cdn.jsdelivr.net/gh/immortalwrt/luci@master/applications/luci-app-zerotier"
+  local files=(
+    "htdocs/luci-static/resources/view/zerotier/config.js"
+    "htdocs/luci-static/resources/view/zerotier/interface.js"
+    "po/zh_Hans/zerotier.po"
+    "po/zh_Hant/zerotier.po"
+    "po/templates/zerotier.pot"
+    "root/etc/uci-defaults/40_luci-zerotier"
+    "root/usr/share/luci/menu.d/luci-app-zerotier.json"
+    "root/usr/share/rpcd/acl.d/luci-app-zerotier.json"
+  )
+  mkdir -p "${dest}"
+  local f
+  for f in "${files[@]}"; do
+    mkdir -p "${dest}/$(dirname "${f}")"
+    curl -fsSL --retry 3 --max-time 60 "${base}/${f}" -o "${dest}/${f}" 2>/dev/null || {
+      echo "  [warn] CDN 下载失败: ${f}" >&2
+      rm -f "${dest}/${f}"
+    }
+  done
+  [ -s "${dest}/htdocs/luci-static/resources/view/zerotier/config.js" ]
+}
+
+# 在仓库内查找 luci-app-zerotier（兼容 packages/ 下、根目录、多套一层等放置方式）
+LOCAL_LUCI="$(find "${REPO_ROOT}" -maxdepth 3 -type d -name luci-app-zerotier \
+                -not -path '*/.git/*' 2>/dev/null | head -n1)"
+
+if [ -z "${LOCAL_LUCI}" ]; then
+  echo ">>> [提示] 仓库内未找到 packages/luci-app-zerotier，改为从上游获取..."
+  echo "     仓库根目录内容（用于排查是否漏提交目录）:"
+  ls -la "${REPO_ROOT}" >&2 || true
+  TMPD="$(mktemp -d)"
+  if fetch_luci_from_cdn "${TMPD}/app"; then
+    LOCAL_LUCI="${TMPD}/app"
+    echo ">>> 已从 jsDelivr 获取 luci-app-zerotier"
+  elif git clone --depth 1 --filter=blob:none --sparse \
+        https://github.com/immortalwrt/luci.git "${TMPD}/luci" >/dev/null 2>&1 \
+     && ( cd "${TMPD}/luci" && git sparse-checkout set applications/luci-app-zerotier >/dev/null 2>&1 ) \
+     && [ -d "${TMPD}/luci/applications/luci-app-zerotier" ]; then
+    LOCAL_LUCI="${TMPD}/luci/applications/luci-app-zerotier"
+    echo ">>> 已从 GitHub 获取 luci-app-zerotier"
+  else
+    rm -rf "${TMPD}"
+    echo "ERROR: 无法获取 luci-app-zerotier，编译中止" >&2
+    echo "       本地执行以下命令把目录提交进仓库：" >&2
+    echo "         git add -f packages/luci-app-zerotier" >&2
+    echo "         git commit -m 'feat: add luci-app-zerotier' && git push" >&2
+    exit 1
+  fi
+  echo "     （建议把该目录提交进仓库，避免每次编译依赖网络）"
 else
-  echo "ERROR: 未找到 packages/luci-app-zerotier，无法编译 LuCI 界面" >&2
-  exit 1
+  echo ">>> 注入内嵌 LuCI 应用: ${LOCAL_LUCI}"
+fi
+
+rm -rf package/luci-app-zerotier
+cp -r "${LOCAL_LUCI}" package/luci-app-zerotier
+
+# 校正 Makefile：
+# 1) 上游原版用 ../../luci.mk，复制到 SDK 的 package/ 下会找不到
+# 2) 末尾必须保留 "# call BuildPackage" 注释，否则 SDK 的包扫描（grep 该关键字）会跳过整个目录
+if ! grep -q 'feeds/luci/luci.mk' package/luci-app-zerotier/Makefile 2>/dev/null \
+   || ! grep -q 'call BuildPackage' package/luci-app-zerotier/Makefile 2>/dev/null; then
+  echo ">>> 校正 luci-app-zerotier/Makefile"
+  write_luci_makefile package/luci-app-zerotier
 fi
 
 # 4. 生成配置（显式启用三个包，defconfig 会自动补齐依赖）

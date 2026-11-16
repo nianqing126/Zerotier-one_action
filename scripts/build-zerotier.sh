@@ -154,6 +154,9 @@ write_luci_makefile() {
 # 内嵌版：源自 immortalwrt/luci applications/luci-app-zerotier
 include $(TOPDIR)/rules.mk
 
+PKG_VERSION:=1.0.0
+PKG_RELEASE:=1
+
 LUCI_TITLE:=LuCI for Zerotier
 LUCI_DEPENDS:=+zerotier
 
@@ -226,8 +229,10 @@ cp -r "${LOCAL_LUCI}" package/luci-app-zerotier
 # 校正 Makefile：
 # 1) 上游原版用 ../../luci.mk，复制到 SDK 的 package/ 下会找不到
 # 2) 末尾必须保留 "# call BuildPackage" 注释，否则 SDK 的包扫描（grep 该关键字）会跳过整个目录
+# 3) 没有 PKG_VERSION 时版本号会变成 unknown
 if ! grep -q 'feeds/luci/luci.mk' package/luci-app-zerotier/Makefile 2>/dev/null \
-   || ! grep -q 'call BuildPackage' package/luci-app-zerotier/Makefile 2>/dev/null; then
+   || ! grep -q 'call BuildPackage' package/luci-app-zerotier/Makefile 2>/dev/null \
+   || ! grep -q 'PKG_VERSION' package/luci-app-zerotier/Makefile 2>/dev/null; then
   echo ">>> 校正 luci-app-zerotier/Makefile"
   write_luci_makefile package/luci-app-zerotier
 fi
@@ -309,6 +314,21 @@ if [ -z "$(ls -A ../out 2>/dev/null)" ]; then
   echo "ERROR: 未收集到任何安装包，请检查编译日志" >&2
   exit 1
 fi
+
+# 统一加芯片前缀：apk 的文件名本身不含架构，不同架构会重名并互相覆盖；
+# ipk 中 mt7621 / mt7620 同为 mipsel_24kc，同样会重名。
+# 例: mt7621-zerotier_1.12.2-2_mipsel_24kc.ipk / mt7981-zerotier-1.16.2-r1.apk
+# （opkg / apk 安装时只看包内元数据，不依赖文件名，改名不影响安装）
+TAG="$(printf '%s' "${SUBTARGET}" | tr '[:upper:]' '[:lower:]')"
+shopt -s nullglob
+for f in ../out/*.ipk ../out/*.apk; do
+  base="$(basename "${f}")"
+  case "${base}" in
+    "${TAG}-"*) continue ;;
+  esac
+  mv "${f}" "../out/${TAG}-${base}"
+done
+shopt -u nullglob
 
 echo "=========================================================="
 echo " 编译完成，产物列表:"

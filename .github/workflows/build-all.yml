@@ -1,0 +1,156 @@
+# =============================================================================
+# 一键编译全部架构 —— MT7621A + MT7620 + MT7981B（ipk + apk = 6 个包）
+#
+# 本文件完全自包含：不引用其它 workflow 文件，只依赖 scripts/build-zerotier.sh，
+# 因此单独放进 .github/workflows/ 目录即可被 GitHub 识别并显示在 Actions 列表。
+# =============================================================================
+name: ZeroTier 全架构一键编译
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'OpenWrt 稳定版版本号（编译 ipk 用，apk 固定用 snapshot）'
+        required: true
+        default: '23.05.5'
+      release_tag:
+        description: '发布到 Release 的 Tag（6 个包合并到同一个 Release）'
+        required: true
+        default: 'zerotier-all-latest'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  # workflow_dispatch 时有值；tag push 时 inputs 为空，回落到 23.05.5
+  OPENWRT_VERSION: ${{ inputs.openwrt_version || '23.05.5' }}
+  # tag push 用 tag 名，手动触发用输入的 tag
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+
+jobs:
+  # ---------- 3 架构 × 2 格式 = 6 个并行编译任务 ----------
+  build:
+    name: ${{ matrix.arch }} · ${{ matrix.fmt }}
+    runs-on: ubuntu-22.04
+    # fail-fast: false → 某个架构失败不影响其它架构继续编译、继续发布
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [MT7621A, MT7620, MT7981B]
+        fmt: [ipk, apk]
+        include:
+          - arch: MT7621A
+            target: ramips
+            subtarget: mt7621
+            slug: mt7621
+          - arch: MT7620
+            target: ramips
+            subtarget: mt7620
+            slug: mt7620
+          - arch: MT7981B
+            target: mediatek
+            subtarget: filogic
+            slug: mt7981
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-setuptools rsync swig unzip xz-utils bzip2 zstd zlib1g-dev file wget
+
+      - name: 编译 ${{ matrix.arch }} (${{ matrix.fmt }})
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.fmt }}" = "ipk" ]; then
+            VER="$OPENWRT_VERSION"
+          else
+            VER="snapshot"
+          fi
+          echo ">>> 目标: ${{ matrix.target }}/${{ matrix.subtarget }}  版本: ${VER}"
+          bash scripts/build-zerotier.sh "${{ matrix.target }}" "${{ matrix.subtarget }}" "${VER}"
+
+      - name: 整理产物
+        run: |
+          mkdir -p pkg
+          cp -v out/*."${{ matrix.fmt }}" pkg/ 2>/dev/null || true
+          ls -lh pkg || true
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: zerotier-${{ matrix.fmt }}-${{ matrix.slug }}
+          path: pkg/*
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------- 汇总发布（只有一个 release job，避免多任务抢同一个 Release） ----------
+  release:
+    name: 发布到 Release
+    needs: build
+    # 始终执行：矩阵任务部分成功时也能发布已有产物；全失败时由下面的 count 判断跳过
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 统计产物
+        id: check
+        run: |
+          mkdir -p dist
+          echo "文件清单："
+          ls -lh dist || true
+          COUNT=$(find dist -type f \( -name '*.ipk' -o -name '*.apk' \) | wc -l)
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+          echo "共 ${COUNT} 个安装包"
+
+      - name: 发布到 GitHub Release
+        if: steps.check.outputs.count != '0'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ZeroTier 全架构 (${{ env.RELEASE_TAG }})
+          body: |
+            ## ZeroTier for OpenWrt —— 全架构一键编译
+
+            覆盖 3 个架构 × 2 种包格式，共 6 套安装包。
+
+            | 架构 | OpenWrt target | 包架构 | 代表机型 |
+            |---|---|---|---|
+            | MT7621A | ramips/mt7621 | mipsel_24kc | 小米 3G/4A、Newifi D2、K2P、红米 AC2100 |
+            | MT7620 | ramips/mt7620 | mipsel_24kc | 小米路由器 mini、斐讯 K2、极路由、优酷路由宝 |
+            | MT7981B | mediatek/filogic | aarch64_cortex-a53 | GL-MT3000、小米 WR30U、360 T7、RAX3000M |
+
+            ### 每个架构都包含 3 个包
+            | 包名 | 说明 |
+            |---|---|
+            | `zerotier` | ZeroTier 主程序 + init 脚本 + `/etc/config/zerotier` |
+            | `luci-app-zerotier` | LuCI 网页界面（菜单：VPN → ZeroTier） |
+            | `luci-i18n-zerotier-zh-cn` | LuCI 简体中文语言包 |
+
+            ### 格式选择
+            - `.ipk`：OpenWrt 21.02 / 22.03 / 23.05 / 24.10 等使用 **opkg** 的系统
+            - `.apk`：OpenWrt 25.12 / SNAPSHOT 等使用 **apk** 包管理器的系统
+
+            ```sh
+            # opkg 系统
+            opkg update && opkg install zerotier_*.ipk luci-app-zerotier_*.ipk luci-i18n-zerotier-zh-cn_*.ipk
+
+            # apk 系统（本地安装需 --allow-untrusted）
+            apk add --allow-untrusted zerotier-*.apk luci-app-zerotier-*.apk luci-i18n-zerotier-zh-cn-*.apk
+            ```
+
+            安装后到 **LuCI → VPN → ZeroTier** 填 Network ID 即可加入网络。
+          files: dist/*
+          fail_on_unmatched_files: false

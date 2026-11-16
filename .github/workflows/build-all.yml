@@ -143,12 +143,16 @@ jobs:
             - `.ipk`：OpenWrt 21.02 / 22.03 / 23.05 / 24.10 等使用 **opkg** 的系统
             - `.apk`：OpenWrt 25.12 / SNAPSHOT 等使用 **apk** 包管理器的系统
 
+            所有文件名都以架构为前缀：`mt7621-` / `mt7620-` / `mt7981-`，下载对应架构的一整套即可。
+            `luci-app-zerotier` 与 `luci-i18n-*` 是 **noarch（全架构通用）**，各架构那份内容完全相同，任选其一。
+
             ```sh
+            # 以 MT7621A 为例（换成 mt7620 / mt7981 即可）
             # opkg 系统
-            opkg update && opkg install zerotier_*.ipk luci-app-zerotier_*.ipk luci-i18n-zerotier-zh-cn_*.ipk
+            opkg update && opkg install mt7621-zerotier_*.ipk mt7621-luci-app-zerotier_*.ipk mt7621-luci-i18n-zerotier-zh-cn_*.ipk
 
             # apk 系统（本地安装需 --allow-untrusted）
-            apk add --allow-untrusted zerotier-*.apk luci-app-zerotier-*.apk luci-i18n-zerotier-zh-cn-*.apk
+            apk add --allow-untrusted mt7621-zerotier-*.apk mt7621-luci-app-zerotier-*.apk mt7621-luci-i18n-zerotier-zh-cn-*.apk
             ```
 
             安装后到 **LuCI → VPN → ZeroTier** 填 Network ID 即可加入网络。

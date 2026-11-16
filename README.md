@@ -7,7 +7,7 @@
 | 芯片 | OpenWrt Target | 架构 | 代表机型 | Workflow 文件 |
 |---|---|---|---|---|
 | **MT7621A** | `ramips/mt7621` | mipsel_24kc | 小米 3G/4A、Newifi D2、红米 AC2100、K2P | `build-mt7621.yml` |
-| **MT7620** | `ramips/mt7620` | mipsel_24kc | 小米 mini、斐讯 K2、极路由 | `build-mt7620.yml` |
+| **MT7620** | `ramips/mt7620` | mipsel_24kc（与 MT7621A 同架构） | 小米 mini、斐讯 K2、极路由 | `build-mt7620.yml` |
 | **MT7981B** | `mediatek/filogic` | aarch64_cortex-a53 | GL-MT3000、小米 WR30U、360 T7 | `build-mt7981.yml` |
 
 ## 产出格式
@@ -85,16 +85,37 @@ git tag mt7621-v1.0.0 && git push origin mt7621-v1.0.0
 
 编译完成后（单个架构约 10~20 分钟），到仓库 **Releases** 页面下载对应的 `.ipk` / `.apk` 文件。
 
+**文件名以架构为前缀**，一眼可辨、不会互相覆盖：
+
+```
+mt7621-zerotier_1.12.2-2_mipsel_24kc.ipk          ← 主程序（MT7621A）
+mt7621-zerotier-1.16.2-r1.apk                     ← 主程序（MT7621A, snapshot）
+mt7621-luci-app-zerotier_1.0.0-1_all.ipk          ← 界面（noarch，全架构通用）
+mt7621-luci-i18n-zerotier-zh-cn_1.0.0-1_all.ipk   ← 中文语言包（noarch）
+```
+
+> `.apk` 格式本身不带架构后缀（OpenWrt 官方仓库靠目录区分架构），放到同一个 Release 里就必须靠文件名前缀区分，否则不同架构会重名互相覆盖。
+
+## 架构说明
+
+| 架构 | OpenWrt target | 包架构标识 | 说明 |
+|---|---|---|---|
+| MT7621A | `ramips/mt7621` | `mipsel_24kc` | |
+| MT7620 | `ramips/mt7620` | `mipsel_24kc` | **与 MT7621A 同一 CPU 架构**，zerotier 是纯用户态程序，二进制互通；但两者 SDK 不同（gcc/libc 版本可能不同），项目仍分开编译，各自用自己 SDK 最稳 |
+| MT7981B | `mediatek/filogic` | `aarch64_cortex-a53` | 与上面两个完全不同，不可混用 |
+
+**LuCI 界面和语言包不需要区分架构**：它们是 `Architecture: all`（apk 中为 `noarch`），内容与 CPU 无关，各架构那份完全一致，装任意一份都行。
+
 ## 路由器上安装
 
 ```bash
-# 把三个安装包一起传到路由器 /tmp 后：
+# 把三个安装包一起传到路由器 /tmp 后（以 MT7621A 为例）：
 
 # OpenWrt 稳定版 (opkg)
-opkg install zerotier_*.ipk luci-app-zerotier_*.ipk luci-i18n-zerotier-zh-cn_*.ipk
+opkg install mt7621-zerotier_*.ipk mt7621-luci-app-zerotier_*.ipk mt7621-luci-i18n-zerotier-zh-cn_*.ipk
 
 # OpenWrt 25.12 / SNAPSHOT (apk)
-apk add --allow-untrusted zerotier-*.apk luci-app-zerotier-*.apk luci-i18n-zerotier-zh-cn-*.apk
+apk add --allow-untrusted mt7621-zerotier-*.apk mt7621-luci-app-zerotier-*.apk mt7621-luci-i18n-zerotier-zh-cn-*.apk
 
 # 启用并加入网络（也可以在 LuCI：VPN → ZeroTier 里操作）
 uci set zerotier.global.enabled='1'

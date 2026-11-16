@@ -1,0 +1,51 @@
+# =============================================================================
+# 一键编译全部架构 —— MT7621A + MT7620 + MT7981B (ipk + apk)
+# 所有架构的产物会合并发布到同一个 Release
+# =============================================================================
+name: ZeroTier 全架构一键编译
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'OpenWrt 稳定版版本号（编译 ipk 用）'
+        required: true
+        default: '23.05.5'
+      release_tag:
+        description: '发布到 Release 的 Tag（三个架构共用同一个 Release）'
+        required: true
+        default: 'zerotier-all-latest'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  mt7621:
+    name: MT7621A
+    uses: ./.github/workflows/build-mt7621.yml
+    with:
+      openwrt_version: ${{ inputs.openwrt_version || '23.05.5' }}
+      release_tag: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+      upload_release: true
+    secrets: inherit
+
+  mt7620:
+    name: MT7620
+    uses: ./.github/workflows/build-mt7620.yml
+    with:
+      openwrt_version: ${{ inputs.openwrt_version || '23.05.5' }}
+      release_tag: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+      upload_release: true
+    secrets: inherit
+
+  mt7981:
+    name: MT7981B
+    uses: ./.github/workflows/build-mt7981.yml
+    with:
+      openwrt_version: ${{ inputs.openwrt_version || '23.05.5' }}
+      release_tag: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+      upload_release: true
+    secrets: inherit

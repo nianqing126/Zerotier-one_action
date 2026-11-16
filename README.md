@@ -14,8 +14,19 @@
 
 | 格式 | 编译来源 | 适用系统 |
 |---|---|---|
-| **.ipk** | OpenWrt 23.05.5 稳定版 SDK | OpenWrt 21.02 / 22.03 / 23.05 等使用 **opkg** 的稳定版 |
-| **.apk** | OpenWrt SNAPSHOT SDK | OpenWrt 快照版 / 24.10 之后使用 **apk** 包管理器的系统 |
+| **.ipk** | OpenWrt 23.05.5 稳定版 SDK | OpenWrt 21.02 / 22.03 / 23.05 / 24.10 等使用 **opkg** 的系统 |
+| **.apk** | OpenWrt SNAPSHOT SDK | OpenWrt 25.12 / 快照版等使用 **apk** 包管理器的系统 |
+
+每个格式都会产出 **3 个包**：
+
+| 包名 | 说明 |
+|---|---|
+| `zerotier` | ZeroTier 主程序 + init 脚本 + `/etc/config/zerotier` |
+| `luci-app-zerotier` | LuCI 网页界面（菜单：VPN → ZeroTier） |
+| `luci-i18n-zerotier-zh-cn` | LuCI 中文语言包（同时产出 zh-tw / ru） |
+
+> LuCI 界面使用仓库内嵌的 `packages/luci-app-zerotier`（源自 immortalwrt/luci，GPL-3.0），
+> 采用 JS 版 LuCI 写法，兼容 21.02 ~ 25.12 的 LuCI；官方 feeds 自 23.05 起已不再提供该应用。
 
 ## 项目结构
 
@@ -24,7 +35,9 @@
 │   ├── build-mt7621.yml      # MT7621A: ipk + apk + Release
 │   ├── build-mt7620.yml      # MT7620:  ipk + apk + Release
 │   ├── build-mt7981.yml      # MT7981B: ipk + apk + Release
-│   └── build-all.yml         # 一键编译全部架构，合并发布
+│   └── build-all.yml         # 一键编译全部架构（自包含、6 任务并行、单 Release）
+├── packages/
+│   └── luci-app-zerotier/    # 内嵌的 LuCI 界面 + 中文语言包（随编译注入 SDK）
 ├── scripts/
 │   └── build-zerotier.sh     # 核心编译脚本（三个架构共用）
 └── README.md
@@ -75,15 +88,15 @@ git tag mt7621-v1.0.0 && git push origin mt7621-v1.0.0
 ## 路由器上安装
 
 ```bash
-# 把安装包传到路由器后：
+# 把三个安装包一起传到路由器 /tmp 后：
 
 # OpenWrt 稳定版 (opkg)
-opkg install zerotier_*.ipk
+opkg install zerotier_*.ipk luci-app-zerotier_*.ipk luci-i18n-zerotier-zh-cn_*.ipk
 
-# OpenWrt SNAPSHOT (apk)
-apk add --allow-untrusted zerotier-*.apk
+# OpenWrt 25.12 / SNAPSHOT (apk)
+apk add --allow-untrusted zerotier-*.apk luci-app-zerotier-*.apk luci-i18n-zerotier-zh-cn-*.apk
 
-# 启用并加入网络
+# 启用并加入网络（也可以在 LuCI：VPN → ZeroTier 里操作）
 uci set zerotier.global.enabled='1'
 uci add zerotier network
 uci set zerotier.@network[-1].id='<你的 Network ID>'
@@ -91,17 +104,24 @@ uci commit zerotier
 /etc/init.d/zerotier restart
 ```
 
+安装完成后刷新 LuCI，左侧 **VPN → ZeroTier** 即为管理界面；中文界面在「系统 → 系统 → 语言和界面」中选择「简体中文」。
+
 ## 自定义
 
 - **更换 ZeroTier 版本**：ipk 版本由所选 OpenWrt 稳定版的 packages feed 决定（23.05 为 1.12.x），apk 由 snapshot feed 决定（最新版）。如需指定版本，可在 `scripts/build-zerotier.sh` 的 feeds 更新后 checkout 对应 commit。
 - **增加新架构**：复制任意一个 workflow 文件，修改 `env` 中的 `TARGET` / `SUBTARGET` / `ARCH_NAME` 三项即可。
-- **编译其他软件包**：修改 `scripts/build-zerotier.sh` 中的 `PKG="zerotier"` 即可编译 packages feed 中的任意软件。
+- **修改 LuCI 界面**：直接编辑 `packages/luci-app-zerotier/` 下的 JS / po 文件，编译时会被注入 SDK。
 
 ## 常见问题
 
 | 问题 | 解决方法 |
 |---|---|
+| `Please install GNU 'install'` | 新版 Ubuntu 镜像改用 uutils coreutils，`install --version` 不含 GNU，导致 SDK prereq 误判。已做三重处理：编译任务固定 `ubuntu-22.04`、脚本自动修复 GNU coreutils、失败时自动跳过误判检查 |
+| Release 只有 `zerotier` 没有 luci | 说明跑的是旧版脚本，请确认仓库中的 `scripts/build-zerotier.sh` 与 `packages/luci-app-zerotier/` 是新版（日志里应出现「注入内嵌 LuCI 应用」） |
 | Release 发布失败 (403) | 检查 Settings → Actions → General → Workflow permissions 是否为 **Read and write** |
 | SDK 下载 404 | 检查 `openwrt_version` 是否存在，或该版本是否支持对应 target |
 | snapshot 编译失败 | snapshot 是滚动开发版，偶发失败属正常，可隔几天重跑 |
 | MT7981 在 22.03 找不到 | filogic 自 23.05 才进入稳定版，请使用 23.05+ 或 snapshot |
+| 放进 `.github/workflows/` 后 Actions 里不显示 | ① 目录必须是 `workflows`（带 s），文件后缀必须是 `.yml` / `.yaml`；② **必须在默认分支（main / master）上**，GitHub 只展示默认分支的 workflow，其他分支的只在 PR 里有体现；③ 若是「调用其它 workflow」的写法，被调用的文件必须同分支存在且含 `workflow_call`，否则整个文件被判无效而不显示；④ 提交后刷新页面，偶有 1 分钟延迟。当前 `build-all.yml` 已改为**自包含**，不再依赖其它文件 |
+| 报错 `ERROR: 未找到 packages/luci-app-zerotier` | 仓库里没提交这个新增目录。脚本已改为自动从 jsDelivr / GitHub 拉取兜底，但建议本地执行 `git add -f packages/luci-app-zerotier` 后提交，避免每次编译都依赖网络 |
+| `No rule to make target 'package/luci-app-zerotier/compile'` | `packages/luci-app-zerotier/Makefile` 末尾的 `# call BuildPackage - OpenWrt buildroot signature` 注释被删了。SDK 扫描包时用 `grep` 找这句关键字，缺了整包会被静默跳过（脚本会自动补回） |
